@@ -1,0 +1,18 @@
+---
+# Task to install required packages
+
+# Install each package in the list
+- name: Install required packages
+  ansible.builtin.package:
+    name:
+      - curl
+      - lsof
+      - mc
+      - nano
+      - tar
+      - unzip
+      - vim
+      - zip
+    state: present
+  when: install_package
+  become: yes

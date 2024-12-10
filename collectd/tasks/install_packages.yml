@@ -1,0 +1,8 @@
+---
+# Install collectd-write_prometheus plugin
+- name: Install collectd-write_prometheus plugin
+  ansible.builtin.package:
+    name: write_prometheus
+    state: latest
+    update_cache: yes
+  notify: Restart_collectd_service

@@ -1,0 +1,10 @@
+---
+# Task to install collect
+
+# Install collectd package
+- name: Install collectd package
+  ansible.builtin.package:
+    name: collectd
+    state: latest
+    update_cache: yes
+  notify: Restart_collectd_service

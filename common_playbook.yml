@@ -1,0 +1,8 @@
+---
+- name: Install required common packages and disable AppArmor
+  hosts: managed_nodes
+  become: yes
+  roles:
+    - role: common
+      vars:
+        install_package: true

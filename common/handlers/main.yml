@@ -1,0 +1,8 @@
+---
+# handlers file for common
+
+- name: Reboot
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  when: disable_selinux
+  

@@ -1,0 +1,38 @@
+LoadPlugin write_prometheus
+
+<Plugin write_prometheus>
+  Port 9103
+</Plugin>
+
+# Load Collectd Modules
+LoadPlugin df
+<Plugin df>
+</Plugin>
+
+LoadPlugin processes
+<Plugin processes>
+</Plugin>
+
+LoadPlugin protocols
+<Plugin protocols>
+</Plugin>
+
+LoadPlugin swap
+<Plugin swap>
+</Plugin>
+
+LoadPlugin tcpconns
+<Plugin tcpconns>
+</Plugin>
+
+LoadPlugin uptime
+<Plugin uptime>
+</Plugin>
+
+LoadPlugin users
+<Plugin users>
+</Plugin>
+
+LoadPlugin vmem
+<Plugin vmem>
+</Plugin>
