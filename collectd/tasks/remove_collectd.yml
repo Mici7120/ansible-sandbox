@@ -1,0 +1,25 @@
+---
+# Tasks to remove collectd and its Prometheus configuration
+
+- name: Check if collectd service exists
+  ansible.builtin.command: "systemctl list-unit-files collectd.service"
+  register: collectd_unit_check
+  failed_when: false
+  changed_when: false
+
+- name: Stop and disable collectd service
+  ansible.builtin.systemd:
+    name: collectd
+    state: stopped
+    enabled: false
+  when: "'collectd.service' in collectd_unit_check.stdout"
+
+- name: Remove Write Prometheus plugin config
+  ansible.builtin.file:
+    path: /etc/collectd/collectd.conf.d/prometheus.conf
+    state: absent
+
+- name: Remove collectd package
+  ansible.builtin.package:
+    name: collectd
+    state: absent
