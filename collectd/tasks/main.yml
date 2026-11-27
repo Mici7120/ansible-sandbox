@@ -1,20 +1,27 @@
 ---
 # tasks file for collectd
 
-- include_tasks: install_collectd.yml
+- name: Install and configure collectd
+  when: collectd_state == 'present'
+  block:
+    - name: Include collectd installation tasks
+      ansible.builtin.include_tasks: install_collectd.yml
 
-- name: Deploy Write Prometheus plugin config
-  ansible.builtin.template:
-    src: template.j2
-    dest: "/etc/collectd/collectd.conf.d/prometheus.conf"
-    owner: root
-    group: root
-    mode: '0644'
-  notify: Restart_collectd_service
+    - name: Deploy Write Prometheus plugin config
+      ansible.builtin.template:
+        src: template.j2
+        dest: /etc/collectd/collectd.conf.d/prometheus.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart_collectd_service
 
-- name: Ensure collectd service is running and enabled
-  ansible.builtin.systemd:
-    name: collectd
-    state: started
-    enabled: yes
-  notify: Restart_collectd_service
+    - name: Ensure collectd service is running and enabled
+      ansible.builtin.systemd:
+        name: collectd
+        state: started
+        enabled: true
+
+- name: Remove collectd
+  ansible.builtin.include_tasks: remove_collectd.yml
+  when: collectd_state == 'absent'
