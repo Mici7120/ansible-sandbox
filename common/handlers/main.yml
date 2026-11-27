@@ -4,5 +4,4 @@
 - name: Reboot
   ansible.builtin.reboot:
     reboot_timeout: 300
-  when: disable_selinux
-  
+  when: reboot_on_apparmor_disable | bool

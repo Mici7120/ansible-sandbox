@@ -2,3 +2,4 @@
 # defaults file for common
 
 install_package: false
+reboot_on_apparmor_disable: false
