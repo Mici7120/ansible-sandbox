@@ -19,18 +19,13 @@ Rol de Ansible encargado del aprovisionamiento base de nodos Linux: instala un c
 | Variable | Tipo | Valor por defecto | Descripción |
 | :--- | :--- | :--- | :--- |
 | `install_package` | `bool` | `false` | Controla si se ejecuta la tarea de instalación de paquetes base en `tasks/install_packages.yml`. En `common_playbook.yml` se sobrescribe a `true`. |
-
-### Variables referenciadas externamente
-
-| Variable | Ubicación | Observación |
-| :--- | :--- | :--- |
-| `disable_selinux` | `handlers/main.yml` | Referenciada en la condición `when: disable_selinux` del handler `Reboot`, pero **no está definida** en `defaults/main.yml` ni en `vars/main.yml`. Ver [Observaciones](#observaciones). |
+| `reboot_on_apparmor_disable` | `bool` | `false` | Controla si el handler `Reboot` reinicia el nodo cuando se deshabilita AppArmor. |
 
 ---
 
 ## Tareas
 
-El archivo `tasks/main.yml` incluye secuencialmente dos archivos de tareas:
+El archivo `tasks/main.yml` incluye secuencialmente dos archivos de tareas mediante `ansible.builtin.include_tasks`:
 
 1. **`tasks/install_packages.yml`**
    - Se ejecuta únicamente cuando `install_package` es `true`.
@@ -56,7 +51,7 @@ El archivo `tasks/main.yml` incluye secuencialmente dos archivos de tareas:
 
 | Handler | Módulo | Acción | Condición |
 | :--- | :--- | :--- | :--- |
-| `Reboot` | `ansible.builtin.reboot` | Reinicia el nodo con `reboot_timeout: 300` | `when: disable_selinux` |
+| `Reboot` | `ansible.builtin.reboot` | Reinicia el nodo con `reboot_timeout: 300` | `when: reboot_on_apparmor_disable \| bool` |
 
 ---
 
@@ -73,8 +68,10 @@ flowchart TD
     C2 -- "No" --> DONE(["Fin del rol"])
     C2 -- "Sí" --> A1["systemd: stop apparmor"]
     A1 --> A2["systemd: disable apparmor\nnotify: Reboot"]
-    A2 --> H1["Handler: Reboot\nwhen: disable_selinux"]
-    H1 --> DONE
+    A2 --> H1{"Handler: Reboot\n¿reboot_on_apparmor_disable | bool?"}
+    H1 -- "true" --> REB["ansible.builtin.reboot\ntimeout: 300s"]
+    H1 -- "false (default)" --> DONE
+    REB --> DONE
 ```
 
 ---
@@ -96,11 +93,7 @@ Ninguna (`dependencies: []` en `meta/main.yml`).
     - role: common
       vars:
         install_package: true
+        reboot_on_apparmor_disable: false
 ```
 
----
-
-## Observaciones
-
-- **Handler `Reboot` con variable indefinida:** En `handlers/main.yml`, el handler `Reboot` tiene la condición `when: disable_selinux`, la cual no está declarada en el rol. Si AppArmor está activo en el nodo destino, el handler será notificado y Ansible arrojará un error por variable no definida a menos que se pase `-e disable_selinux=false` (o `true`) o se corrija la condición en el handler.
-- Consulta el análisis completo del repositorio en [`docs/architecture.md`](../docs/architecture.md).
+Consulta el análisis completo del repositorio en [`docs/architecture.md`](../docs/architecture.md).

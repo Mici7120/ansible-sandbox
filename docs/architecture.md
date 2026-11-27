@@ -1,6 +1,6 @@
 # Arquitectura, Documentación y Diagramas de Scripts
 
-Este documento presenta el análisis técnico completo del repositorio **`ansible-sandbox`**, incluyendo diagramas de arquitectura, flujos de ejecución por playbook y rol, secuencia de interacción con los nodos gestionados, inventario detallado de archivos y observaciones técnicas detectadas durante la revisión.
+Este documento presenta el análisis técnico completo del repositorio **`ansible-sandbox`**, incluyendo diagramas de arquitectura, flujos de ejecución por playbook y rol, secuencia de interacción con los nodos gestionados, inventario detallado de archivos y estado de las mejoras aplicadas.
 
 ---
 
@@ -17,23 +17,21 @@ flowchart TD
     PB2 --> R2["Rol: collectd"]
 
     subgraph COMMON["Rol common"]
-        C_DEF["defaults/main.yml\ninstall_package: false"] -.-> C_MAIN
+        C_DEF["defaults/main.yml\ninstall_package: false\nreboot_on_apparmor_disable: false"] -.-> C_MAIN
         C_MAIN["tasks/main.yml"] --> C_PKG["tasks/install_packages.yml\nInstala 8 paquetes base"]
         C_MAIN --> C_AA["tasks/apparmor.yml\nDetiene y deshabilita AppArmor"]
-        C_AA -. "notify: Reboot" .-> C_HND["handlers/main.yml\nReboot (when: disable_selinux)"]
+        C_AA -. "notify: Reboot" .-> C_HND["handlers/main.yml\nReboot (when: reboot_on_apparmor_disable)"]
     end
 
     subgraph COLLECTD["Rol collectd"]
-        COL_MAIN["tasks/main.yml"] --> COL_INST["tasks/install_collectd.yml\nInstala paquete collectd"]
-        COL_MAIN --> COL_TPL["Despliegue de plantilla\ntemplates/template.j2"]
-        COL_MAIN --> COL_SVC["Asegura servicio collectd\nstate: started, enabled: yes"]
+        COL_DEF["defaults/main.yml\ncollectd_state: present\ncollectd_prometheus_port: 9103\ncollectd_plugins: [...]"] -.-> COL_MAIN
+        COL_MAIN["tasks/main.yml"] -->|present| COL_INST["tasks/install_collectd.yml\napt update_cache (Debian) + package collectd"]
+        COL_MAIN -->|present| COL_TPL["Despliegue de plantilla\ntemplates/template.j2"]
+        COL_MAIN -->|present| COL_SVC["Asegura servicio collectd\nstate: started, enabled: true"]
+        COL_MAIN -->|absent| COL_REM["tasks/remove_collectd.yml\nDetiene servicio, borra config y paquete"]
 
         COL_INST -. "notify" .-> COL_HND["handlers/main.yml\nRestart_collectd_service"]
         COL_TPL -. "notify" .-> COL_HND
-        COL_SVC -. "notify" .-> COL_HND
-
-        COL_UNUSED1["tasks/install_packages.yml\n(No incluido en main.yml)"]
-        COL_UNUSED2["tasks/remove_collectd.yml\n(Vacío / No incluido)"]
     end
 
     R1 --> C_MAIN
@@ -51,15 +49,15 @@ El playbook [`common_playbook.yml`](../common_playbook.yml) aplica el rol [`comm
 
 ```mermaid
 flowchart TD
-    START(["Inicio: common_playbook.yml\nhosts: managed_nodes, become: yes"]) --> VARS["Sobrescribe variable\ninstall_package = true"]
+    START(["Inicio: common_playbook.yml\nhosts: managed_nodes, become: yes"]) --> VARS["Variables\ninstall_package = true\nreboot_on_apparmor_disable = false"]
     VARS --> MAIN["common/tasks/main.yml"]
 
-    MAIN --> INC1["include_tasks: install_packages.yml"]
+    MAIN --> INC1["ansible.builtin.include_tasks:\ninstall_packages.yml"]
     INC1 --> CHK_PKG{"¿install_package == true?"}
     CHK_PKG -- "Sí" --> DO_PKG["ansible.builtin.package\nstate: present\ncurl, lsof, mc, nano, tar, unzip, vim, zip"]
     CHK_PKG -- "No (default: false)" --> SKIP_PKG["Omitir instalación de paquetes"]
 
-    DO_PKG --> INC2["include_tasks: apparmor.yml"]
+    DO_PKG --> INC2["ansible.builtin.include_tasks:\napparmor.yml"]
     SKIP_PKG --> INC2
 
     INC2 --> CHK_AA["ansible.builtin.command\nsystemctl is-active apparmor\nregister: apparmor_status"]
@@ -70,9 +68,9 @@ flowchart TD
     STOP_AA --> DIS_AA["ansible.builtin.systemd\nname: apparmor\nenabled: no\nnotify: Reboot"]
 
     DIS_AA --> HND["Handler: Reboot\ncommon/handlers/main.yml"]
-    HND --> CHK_SEL{"Evaluación condición\nwhen: disable_selinux"}
-    CHK_SEL -- "Variable indefinida" --> ERR["Error en tiempo de ejecución\n'disable_selinux' is undefined"]
-    CHK_SEL -- "Si se define como true" --> REBOOT["ansible.builtin.reboot\nreboot_timeout: 300"]
+    HND --> CHK_REB{"¿reboot_on_apparmor_disable | bool?"}
+    CHK_REB -- "false (default)" --> END_OK
+    CHK_REB -- "true" --> REBOOT["ansible.builtin.reboot\nreboot_timeout: 300"]
     REBOOT --> END_REB(["Fin del playbook tras reinicio"])
 ```
 
@@ -80,31 +78,32 @@ flowchart TD
 
 ## 3. Flujo de Ejecución: `install_collectd_playbook.yml` y Rol `collectd`
 
-El playbook [`install_collectd_playbook.yml`](../install_collectd_playbook.yml) instala `collectd`, despliega la configuración del plugin `write_prometheus` junto con 8 plugins de métricas del sistema y habilita el servicio mediante `systemd`.
+El playbook [`install_collectd_playbook.yml`](../install_collectd_playbook.yml) instala `collectd`, despliega la configuración parametrizada del plugin `write_prometheus` junto con 8 plugins de métricas del sistema y habilita el servicio mediante `systemd`. Si se define `collectd_state: absent`, ejecuta la desinstalación controlada con `remove_collectd.yml`.
 
 ```mermaid
 flowchart TD
     START(["Inicio: install_collectd_playbook.yml\nhosts: managed_nodes, become: yes"]) --> MAIN["collectd/tasks/main.yml"]
+    MAIN --> STATE{"¿collectd_state?"}
 
-    MAIN --> INC1["include_tasks: install_collectd.yml"]
-    INC1 --> PKG["ansible.builtin.package\nname: collectd\nstate: latest, update_cache: yes"]
+    STATE -- "present (default)" --> INC1["ansible.builtin.include_tasks:\ninstall_collectd.yml"]
+    INC1 --> APT["Si os_family == 'Debian':\nansible.builtin.apt update_cache"]
+    APT --> PKG["ansible.builtin.package\nname: collectd, state: latest"]
     PKG -. "Si hay cambio: notify" .-> HND
 
     PKG --> TPL["ansible.builtin.template\nsrc: template.j2\ndest: /etc/collectd/collectd.conf.d/prometheus.conf\nroot:root 0644"]
     TPL -. "Si hay cambio: notify" .-> HND
 
-    TPL --> SVC["ansible.builtin.systemd\nname: collectd\nstate: started, enabled: yes"]
-    SVC -. "Si hay cambio: notify" .-> HND
-
+    TPL --> SVC["ansible.builtin.systemd\nname: collectd\nstate: started, enabled: true"]
     SVC --> END_TASKS{"¿Alguna tarea notificó al handler?"}
     END_TASKS -- "No" --> FINISH(["Fin del playbook"])
     END_TASKS -- "Sí" --> HND["Handler: Restart_collectd_service\nansible.builtin.systemd\nname: collectd, state: restarted, enabled: yes"]
     HND --> FINISH
 
-    subgraph UNUSED["Archivos presentes pero NO incluidos en tasks/main.yml"]
-        U1["install_packages.yml\nInstala paquete 'write_prometheus'"]
-        U2["remove_collectd.yml\nArchivo vacío (0 bytes)"]
-    end
+    STATE -- "absent" --> REM["ansible.builtin.include_tasks:\nremove_collectd.yml"]
+    REM --> REM1["Detiene y deshabilita servicio collectd (si existe)"]
+    REM1 --> REM2["Elimina /etc/collectd/collectd.conf.d/prometheus.conf"]
+    REM2 --> REM3["Desinstala paquete collectd (state: absent)"]
+    REM3 --> FINISH
 ```
 
 ---
@@ -128,15 +127,17 @@ sequenceDiagram
     alt AppArmor está activo
         Admin->>Systemd: Detener servicio apparmor (state: stopped)
         Admin->>Systemd: Deshabilitar apparmor en arranque (enabled: no)
-        Note over Admin,Node: Notifica handler "Reboot" (condicionado a disable_selinux)
+        opt Si reboot_on_apparmor_disable == true
+            Admin->>Node: Handler Reboot (timeout 300s)
+        end
     end
 
     Note over Admin,Collectd: Fase 2: Ejecución de install_collectd_playbook.yml
-    Admin->>Node: Instala/actualiza paquete collectd
-    Admin->>Node: Copia template.j2 a /etc/collectd/collectd.conf.d/prometheus.conf (0644)
+    Admin->>Node: Actualiza caché apt (si Debian) e instala/actualiza collectd
+    Admin->>Node: Renderiza template.j2 en /etc/collectd/collectd.conf.d/prometheus.conf (0644)
     Admin->>Systemd: Inicia y habilita servicio collectd
-    Systemd->>Collectd: Arranca daemon con plugins (df, processes, protocols, swap, tcpconns, uptime, users, vmem, write_prometheus)
-    opt Si hubo cambios en paquete, plantilla o servicio
+    Systemd->>Collectd: Arranca daemon con plugins configurados
+    opt Si cambió el paquete o la plantilla
         Admin->>Systemd: Handler Restart_collectd_service (state: restarted)
         Systemd->>Collectd: Reinicia servicio collectd
     end
@@ -154,54 +155,36 @@ sequenceDiagram
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `common_playbook.yml` | Playbook | Ejecuta el rol `common` sobre `managed_nodes` con `become: yes` | — | Define `install_package: true` | Activo |
 | `install_collectd_playbook.yml` | Playbook | Ejecuta el rol `collectd` sobre `managed_nodes` con `become: yes` | — | Sin variables adicionales | Activo |
-| `common/defaults/main.yml` | Defaults | Define el comportamiento por defecto del rol `common` | — | `install_package: false` | Activo |
+| `common/defaults/main.yml` | Defaults | Define valores por defecto del rol `common` | — | `install_package: false`, `reboot_on_apparmor_disable: false` | Activo |
 | `common/vars/main.yml` | Vars | Archivo de variables del rol `common` | — | Vacío | Plantilla |
-| `common/tasks/main.yml` | Tasks | Punto de entrada del rol `common`; incluye `install_packages.yml` y `apparmor.yml` | `include_tasks` | — | Activo |
+| `common/tasks/main.yml` | Tasks | Punto de entrada del rol `common`; incluye `install_packages.yml` y `apparmor.yml` | `ansible.builtin.include_tasks` | — | Activo |
 | `common/tasks/install_packages.yml` | Tasks | Instala 8 utilidades base (`curl`, `lsof`, `mc`, `nano`, `tar`, `unzip`, `vim`, `zip`) | `ansible.builtin.package` | Condición: `when: install_package` | Activo |
 | `common/tasks/apparmor.yml` | Tasks | Verifica, detiene y deshabilita el servicio `apparmor` si está activo | `ansible.builtin.command`, `ansible.builtin.systemd` | Registra `apparmor_status`; notifica `Reboot` | Activo |
-| `common/handlers/main.yml` | Handlers | Reinicia el nodo tras cambios de seguridad (timeout 300s) | `ansible.builtin.reboot` | Condición: `when: disable_selinux` | Con hallazgo |
+| `common/handlers/main.yml` | Handlers | Reinicia el nodo tras deshabilitar AppArmor (timeout 300s) | `ansible.builtin.reboot` | Condición: `when: reboot_on_apparmor_disable \| bool` | Activo |
 | `common/tests/test.yml` | Test | Playbook de prueba autogenerado por `ansible-galaxy init` | — | Apunta a `localhost` como `root` | Plantilla |
-| `collectd/defaults/main.yml` | Defaults | Archivo de valores por defecto del rol `collectd` | — | Vacío | Plantilla |
+| `collectd/defaults/main.yml` | Defaults | Define valores por defecto del rol `collectd` | — | `collectd_state`, `collectd_prometheus_port`, `collectd_plugins` | Activo |
 | `collectd/vars/main.yml` | Vars | Archivo de variables del rol `collectd` | — | Vacío | Plantilla |
-| `collectd/tasks/main.yml` | Tasks | Incluye `install_collectd.yml`, despliega `template.j2` y asegura servicio `collectd` | `include_tasks`, `ansible.builtin.template`, `ansible.builtin.systemd` | Notifica `Restart_collectd_service` | Activo |
-| `collectd/tasks/install_collectd.yml` | Tasks | Instala el paquete `collectd` en su última versión | `ansible.builtin.package` | Notifica `Restart_collectd_service` | Con hallazgo |
-| `collectd/tasks/install_packages.yml` | Tasks | Intenta instalar el paquete `write_prometheus` | `ansible.builtin.package` | Notifica `Restart_collectd_service` | Sin incluir |
-| `collectd/tasks/remove_collectd.yml` | Tasks | Reservado para tareas de desinstalación de `collectd` | — | — | Vacío / Sin incluir |
-| `collectd/templates/template.j2` | Template | Configuración de plugins de `collectd` (`write_prometheus` en puerto `9103` + 8 plugins de sistema) | — | Sin variables Jinja2 | Activo |
+| `collectd/tasks/main.yml` | Tasks | Orquesta instalación/configuración (`present`) o desinstalación (`absent`) de `collectd` | `ansible.builtin.include_tasks`, `ansible.builtin.template`, `ansible.builtin.systemd` | Notifica `Restart_collectd_service` solo al cambiar plantilla/paquete | Activo |
+| `collectd/tasks/install_collectd.yml` | Tasks | Actualiza caché en Debian e instala `collectd` | `ansible.builtin.apt`, `ansible.builtin.package` | Notifica `Restart_collectd_service` | Activo |
+| `collectd/tasks/remove_collectd.yml` | Tasks | Detiene servicio, elimina configuración Prometheus y desinstala `collectd` | `ansible.builtin.command`, `ansible.builtin.systemd`, `ansible.builtin.file`, `ansible.builtin.package` | Ejecutado cuando `collectd_state == 'absent'` | Activo |
+| `collectd/templates/template.j2` | Template | Configuración parametrizada de plugins de `collectd` (`write_prometheus` + lista `collectd_plugins`) | — | Usa `collectd_prometheus_port` y `collectd_plugins` | Activo |
 | `collectd/handlers/main.yml` | Handlers | Reinicia y habilita el servicio `collectd` | `ansible.builtin.systemd` | Handler `Restart_collectd_service` | Activo |
 | `collectd/tests/test.yml` | Test | Playbook de prueba autogenerado por `ansible-galaxy init` | — | Apunta a `localhost` como `root` | Plantilla |
 
 ---
 
-## 6. Observaciones Técnicas y Hallazgos de Revisión
+## 6. Correcciones Aplicadas y Recomendaciones Pendientes
 
-Durante el análisis de los scripts se identificaron los siguientes puntos a tener en cuenta antes de ejecutarlos en entornos productivos:
+### Hallazgos corregidos en `agent-review`
 
-1. **Variable indefinida en el handler `Reboot` (`common/handlers/main.yml`)**
-   - El handler evalúa `when: disable_selinux`, pero dicha variable no existe en `common/defaults/main.yml`, `common/vars/main.yml` ni en `common_playbook.yml`.
-   - Si AppArmor está activo en el nodo destino, la tarea de deshabilitación notificará al handler `Reboot` y Ansible fallará con `'disable_selinux' is undefined`.
-   - **Recomendación:** Definir una variable explícita (por ejemplo `reboot_on_apparmor_disable: false` en `common/defaults/main.yml`) y actualizar la condición del handler.
+1. **Handler `Reboot` (`common/handlers/main.yml` y `common/defaults/main.yml`):** Se reemplazó la variable indefinida `disable_selinux` por `reboot_on_apparmor_disable` (con valor por defecto `false`).
+2. **Actualización de caché portable (`collectd/tasks/install_collectd.yml`):** Se removió `update_cache: yes` de `ansible.builtin.package` y se agregó una tarea condicional con `ansible.builtin.apt` para sistemas `os_family == 'Debian'`.
+3. **Limpieza e implementación de tareas en `collectd/tasks/`:** Se eliminó el archivo sin uso `collectd/tasks/install_packages.yml` y se implementó `collectd/tasks/remove_collectd.yml`, controlado mediante `collectd_state: present | absent`.
+4. **Eliminación de notificación redundante (`collectd/tasks/main.yml`):** Se retiró `notify: Restart_collectd_service` de la tarea que inicia el servicio `collectd`.
+5. **Parametrización de `collectd/templates/template.j2`:** Se parametrizaron `collectd_prometheus_port` y `collectd_plugins` desde `collectd/defaults/main.yml`.
+6. **Consistencia de FQCN:** Se actualizó `include_tasks` a `ansible.builtin.include_tasks` en `common/tasks/main.yml` y `collectd/tasks/main.yml`.
 
-2. **Parámetro `update_cache: yes` en `ansible.builtin.package` (`collectd/tasks/install_collectd.yml` y `collectd/tasks/install_packages.yml`)**
-   - `ansible.builtin.package` es un módulo agnóstico de distribución que delega en el gestor de paquetes subyacente y no documenta `update_cache` como parámetro estándar multiplataforma (es específico de `ansible.builtin.apt`). En sistemas basados en `dnf`/`yum` o con validación estricta puede generar errores.
-   - **Recomendación:** Usar `ansible.builtin.apt` (si el objetivo es Debian/Ubuntu) o actualizar la caché en una tarea condicional según `ansible_facts['os_family']`.
+### Recomendaciones opcionales a futuro
 
-3. **Archivos de tareas no utilizados en el rol `collectd`**
-   - `collectd/tasks/install_packages.yml` no se incluye desde `collectd/tasks/main.yml`, y el nombre de paquete `write_prometheus` no suele coincidir con el nombre real en repositorios estándar (en Debian/Ubuntu viene incluido en `collectd`/`collectd-core`; en RHEL/CentOS suele llamarse `collectd-write_prometheus`).
-   - `collectd/tasks/remove_collectd.yml` está vacío (0 bytes).
-   - **Recomendación:** Implementar la lógica de desinstalación (por ejemplo controlada por tags o una variable de estado) o eliminar los archivos no utilizados para evitar confusión.
-
-4. **Notificación redundante al handler en `collectd/tasks/main.yml`**
-   - La tarea `Ensure collectd service is running and enabled` incluye `notify: Restart_collectd_service`. Si el servicio estaba detenido y se inicia en esa tarea, inmediatamente volverá a reiniciarse al final del play.
-   - **Recomendación:** Mantener `notify: Restart_collectd_service` solo en las tareas de instalación de paquetes y despliegue de configuración (`template`).
-
-5. **Plantilla `collectd/templates/template.j2` sin parametrizar**
-   - Aunque utiliza extensión `.j2` y el módulo `ansible.builtin.template`, no contiene expresiones Jinja2: el puerto `9103` y la lista de plugins están codificados de forma fija.
-   - **Recomendación:** Exponer variables en `collectd/defaults/main.yml` (p. ej. `collectd_prometheus_port: 9103` y `collectd_plugins: [...]`) para hacer reutilizable el rol.
-
-6. **Ausencia de inventario raíz y `ansible.cfg`**
-   - Ambos playbooks apuntan a `hosts: managed_nodes`, pero no existe un archivo de inventario en la raíz del proyecto ni un `ansible.cfg` que documente la configuración por defecto.
-   - **Recomendación:** Añadir un archivo `inventory.example` (o `inventory/hosts.ini.example`) y un `ansible.cfg` base.
-
-7. **Consistencia de FQCN (Fully Qualified Collection Names)**
-   - Las tareas usan `ansible.builtin.package`, `ansible.builtin.systemd`, `ansible.builtin.template` y `ansible.builtin.command`, pero las inclusiones usan la forma corta `include_tasks` en lugar de `ansible.builtin.include_tasks`.
+- Añadir un inventario de ejemplo (`inventory.ini.example`) y un `ansible.cfg` base en la raíz del proyecto.
+- Agregar pruebas automatizadas con `ansible-lint` o Molecule en un flujo de CI.

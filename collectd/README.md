@@ -1,6 +1,6 @@
 # Rol `collectd`
 
-Rol de Ansible para instalar y configurar **collectd** en nodos Linux con soporte de exportación de métricas hacia **Prometheus** a través del plugin `write_prometheus` en el puerto `9103`.
+Rol de Ansible para instalar, configurar y desinstalar **collectd** en nodos Linux con soporte de exportación de métricas hacia **Prometheus** a través del plugin `write_prometheus` en el puerto `9103` (configurable).
 
 ---
 
@@ -14,40 +14,46 @@ Rol de Ansible para instalar y configurar **collectd** en nodos Linux con soport
 
 ## Variables del Rol
 
-Actualmente el rol **no define variables** en `defaults/main.yml` ni en `vars/main.yml`. La ruta de configuración (`/etc/collectd/collectd.conf.d/prometheus.conf`), el puerto (`9103`) y la lista de plugins están definidos de manera fija en `tasks/main.yml` y `templates/template.j2`.
+### `defaults/main.yml`
+
+| Variable | Tipo | Valor por defecto | Descripción |
+| :--- | :--- | :--- | :--- |
+| `collectd_state` | `string` | `present` | Estado deseado del rol: `present` instala y configura `collectd`; `absent` detiene el servicio, elimina la configuración y desinstala el paquete. |
+| `collectd_prometheus_port` | `int` | `9103` | Puerto HTTP en el que el plugin `write_prometheus` expone las métricas. |
+| `collectd_plugins` | `list[str]` | `[df, processes, protocols, swap, tcpconns, uptime, users, vmem]` | Lista de plugins de recolección de `collectd` cargados en `prometheus.conf`. |
 
 ---
 
 ## Tareas
 
-### Tareas activas (`tasks/main.yml`)
+### Cuando `collectd_state == 'present'` (`tasks/main.yml`)
 
-1. **`include_tasks: install_collectd.yml`**
-   - Instala o actualiza el paquete `collectd` mediante `ansible.builtin.package` (`state: latest`, `update_cache: yes`).
+1. **`ansible.builtin.include_tasks: install_collectd.yml`**
+   - Actualiza la caché de `apt` (`cache_valid_time: 3600`) en nodos de la familia `Debian`.
+   - Instala o actualiza el paquete `collectd` mediante `ansible.builtin.package` (`state: latest`).
    - Notifica al handler `Restart_collectd_service`.
 2. **`Deploy Write Prometheus plugin config`**
-   - Despliega `templates/template.j2` en `/etc/collectd/collectd.conf.d/prometheus.conf` (`owner: root`, `group: root`, `mode: '0644'`).
+   - Renderiza `templates/template.j2` en `/etc/collectd/collectd.conf.d/prometheus.conf` (`owner: root`, `group: root`, `mode: '0644'`).
    - Notifica al handler `Restart_collectd_service`.
 3. **`Ensure collectd service is running and enabled`**
-   - Asegura mediante `ansible.builtin.systemd` que el servicio `collectd` esté iniciado (`state: started`) y habilitado al arranque (`enabled: yes`).
-   - Notifica al handler `Restart_collectd_service`.
+   - Asegura mediante `ansible.builtin.systemd` que el servicio `collectd` esté iniciado (`state: started`) y habilitado al arranque (`enabled: true`).
 
-### Archivos de tareas no incluidos
+### Cuando `collectd_state == 'absent'` (`tasks/remove_collectd.yml`)
 
-| Archivo | Contenido actual | Estado |
-| :--- | :--- | :--- |
-| `tasks/install_packages.yml` | Instala el paquete `write_prometheus` (`state: latest`, `update_cache: yes`) y notifica `Restart_collectd_service`. | No incluido en `tasks/main.yml` |
-| `tasks/remove_collectd.yml` | Archivo vacío (0 bytes). | Placeholder sin implementar |
+1. Comprueba si existe `collectd.service` en `systemd`.
+2. Detiene y deshabilita el servicio `collectd` si existe.
+3. Elimina `/etc/collectd/collectd.conf.d/prometheus.conf`.
+4. Desinstala el paquete `collectd` (`state: absent`).
 
 ---
 
 ## Plantilla y Plugins Configurados (`templates/template.j2`)
 
-La plantilla genera `/etc/collectd/collectd.conf.d/prometheus.conf` habilitando los siguientes plugins:
+La plantilla genera `/etc/collectd/collectd.conf.d/prometheus.conf` habilitando `write_prometheus` en el puerto `collectd_prometheus_port` y los plugins definidos en `collectd_plugins`:
 
 | Plugin | Configuración | Propósito |
 | :--- | :--- | :--- |
-| `write_prometheus` | `Port 9103` | Expone las métricas recolectadas en formato Prometheus sobre HTTP en el puerto `9103`. |
+| `write_prometheus` | `Port {{ collectd_prometheus_port }}` (defecto `9103`) | Expone las métricas recolectadas en formato Prometheus sobre HTTP. |
 | `df` | Por defecto | Uso de espacio en disco por sistema de archivos. |
 | `processes` | Por defecto | Estadísticas de procesos del sistema. |
 | `protocols` | Por defecto | Métricas de protocolos de red (TCP/UDP/ICMP, etc.). |
@@ -71,16 +77,19 @@ La plantilla genera `/etc/collectd/collectd.conf.d/prometheus.conf` habilitando 
 
 ```mermaid
 flowchart TD
-    START(["Rol: collectd\ntasks/main.yml"]) --> T1["install_collectd.yml\npackage: collectd (latest)"]
+    START(["Rol: collectd\ntasks/main.yml"]) --> ST{"¿collectd_state?"}
+    ST -- "present (default)" --> T1["install_collectd.yml\napt update_cache (Debian)\npackage: collectd (latest)"]
     T1 -. "notify" .-> HND
-    T1 --> T2["template.j2 ->\n/etc/collectd/collectd.conf.d/prometheus.conf\n(Puerto 9103 + 8 plugins)"]
+    T1 --> T2["template.j2 ->\n/etc/collectd/collectd.conf.d/prometheus.conf\n(Puerto configurable + plugins)"]
     T2 -. "notify" .-> HND
-    T2 --> T3["systemd: collectd\nstate: started, enabled: yes"]
-    T3 -. "notify" .-> HND
+    T2 --> T3["systemd: collectd\nstate: started, enabled: true"]
     T3 --> CHK{"¿Handler notificado?"}
     CHK -- "Sí" --> HND["Handler: Restart_collectd_service\nsystemd: state=restarted, enabled=yes"]
     HND --> DONE(["Fin del rol"])
     CHK -- "No" --> DONE
+
+    ST -- "absent" --> R1["remove_collectd.yml\nDetener servicio + borrar config + remover paquete"]
+    R1 --> DONE
 ```
 
 ---
@@ -100,13 +109,9 @@ Ninguna (`dependencies: []` en `meta/main.yml`).
   become: yes
   roles:
     - role: collectd
+      vars:
+        collectd_state: present
+        collectd_prometheus_port: 9103
 ```
 
----
-
-## Observaciones
-
-- **`update_cache: yes` con `ansible.builtin.package`:** `update_cache` es un parámetro específico de `ansible.builtin.apt` y no es portable en el módulo genérico `ansible.builtin.package`.
-- **Notificación redundante:** La tarea `Ensure collectd service is running and enabled` notifica `Restart_collectd_service`, lo que causa un reinicio adicional si el servicio acababa de arrancarse.
-- **Archivos sin usar:** `tasks/install_packages.yml` y `tasks/remove_collectd.yml` no están referenciados en `tasks/main.yml`.
-- Consulta el análisis completo del repositorio en [`docs/architecture.md`](../docs/architecture.md).
+Consulta el análisis completo del repositorio en [`docs/architecture.md`](../docs/architecture.md).

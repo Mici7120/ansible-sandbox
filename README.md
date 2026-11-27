@@ -12,10 +12,10 @@ ansible-sandbox/
 ├── common_playbook.yml              # Playbook de configuración base y AppArmor
 ├── install_collectd_playbook.yml    # Playbook de instalación y configuración de collectd
 ├── docs/
-│   └── architecture.md              # Documentación técnica detallada, diagramas y hallazgos
+│   └── architecture.md              # Documentación técnica detallada, diagramas y cambios
 ├── common/                          # Rol de configuración base de nodos
 │   ├── README.md                    # Documentación del rol common
-│   ├── defaults/main.yml            # Variable por defecto: install_package: false
+│   ├── defaults/main.yml            # Defaults: install_package, reboot_on_apparmor_disable
 │   ├── handlers/main.yml            # Handler Reboot
 │   ├── meta/main.yml                # Metadatos Galaxy del rol
 │   ├── tasks/
@@ -26,16 +26,15 @@ ansible-sandbox/
 │   └── vars/main.yml
 └── collectd/                        # Rol de monitoreo con collectd + Prometheus
     ├── README.md                    # Documentación del rol collectd
-    ├── defaults/main.yml
+    ├── defaults/main.yml            # Defaults: collectd_state, puerto y plugins
     ├── handlers/main.yml            # Handler Restart_collectd_service
     ├── meta/main.yml                # Metadatos Galaxy del rol
     ├── tasks/
-    │   ├── main.yml                 # Orquestador de tareas del rol collectd
-    │   ├── install_collectd.yml     # Instalación del paquete collectd
-    │   ├── install_packages.yml     # (No incluido) Instalación de write_prometheus
-    │   └── remove_collectd.yml      # (Vacío / No incluido) Placeholder de desinstalación
+    │   ├── main.yml                 # Orquestador de instalación/desinstalación de collectd
+    │   ├── install_collectd.yml     # Caché apt (Debian) e instalación de collectd
+    │   └── remove_collectd.yml      # Desinstalación controlada (collectd_state: absent)
     ├── templates/
-    │   └── template.j2              # Configuración /etc/collectd/collectd.conf.d/prometheus.conf
+    │   └── template.j2              # Plantilla parametrizada para prometheus.conf
     ├── tests/                       # Inventario y playbook de prueba base
     └── vars/main.yml
 ```
@@ -50,12 +49,12 @@ flowchart LR
     INV --> PB2["install_collectd_playbook.yml"]
 
     PB1 --> R1["Rol: common\n- Paquetes base (8)\n- Deshabilitar AppArmor"]
-    PB2 --> R2["Rol: collectd\n- Instalar collectd\n- Config Prometheus (:9103)\n- Habilitar servicio"]
+    PB2 --> R2["Rol: collectd\n- Instalar/Remover collectd\n- Config Prometheus (:9103)\n- Habilitar servicio"]
 
     R2 --> PROM["Prometheus\nScraping :9103"]
 ```
 
-Para ver los **diagramas completos de arquitectura, flujo por rol, diagrama de secuencia y hallazgos de revisión técnica**, consulta:
+Para ver los **diagramas completos de arquitectura, flujo por rol y diagrama de secuencia**, consulta:
 - [Documentación de Arquitectura y Diagramas](docs/architecture.md)
 - [Documentación del Rol `common`](common/README.md)
 - [Documentación del Rol `collectd`](collectd/README.md)
@@ -67,7 +66,7 @@ Para ver los **diagramas completos de arquitectura, flujo por rol, diagrama de s
 | Playbook | Hosts Objetivo | Privilegios | Rol Aplicado | Resumen |
 | :--- | :--- | :--- | :--- | :--- |
 | [`common_playbook.yml`](common_playbook.yml) | `managed_nodes` | `become: yes` | `common` (`install_package: true`) | Instala utilidades base del sistema y detiene/deshabilita AppArmor si está activo. |
-| [`install_collectd_playbook.yml`](install_collectd_playbook.yml) | `managed_nodes` | `become: yes` | `collectd` | Instala `collectd`, despliega la configuración del plugin `write_prometheus` en el puerto `9103` y asegura que el servicio quede activo y habilitado. |
+| [`install_collectd_playbook.yml`](install_collectd_playbook.yml) | `managed_nodes` | `become: yes` | `collectd` | Instala `collectd`, despliega la configuración parametrizada del plugin `write_prometheus` en el puerto `9103` y asegura que el servicio quede activo y habilitado. |
 
 ---
 
@@ -92,8 +91,12 @@ node2.example.local ansible_user=ubuntu
 # 1. Aprovisionamiento base (paquetes comunes + AppArmor)
 ansible-playbook -i inventory.ini common_playbook.yml
 
+# Opcional: reiniciar el nodo automáticamente si AppArmor fue deshabilitado
+ansible-playbook -i inventory.ini common_playbook.yml -e reboot_on_apparmor_disable=true
+
 # 2. Instalación y configuración de collectd con plugin de Prometheus
 ansible-playbook -i inventory.ini install_collectd_playbook.yml
-```
 
-> **Nota importante:** Antes de ejecutar `common_playbook.yml` en nodos donde AppArmor esté activo, revisa los hallazgos documentados en [`docs/architecture.md`](docs/architecture.md#6-observaciones-técnicas-y-hallazgos-de-revisión) (especialmente la variable `disable_selinux` referenciada en el handler `Reboot`).
+# Opcional: desinstalar collectd y su configuración de Prometheus
+ansible-playbook -i inventory.ini install_collectd_playbook.yml -e collectd_state=absent
+```
